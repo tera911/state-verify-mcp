@@ -1,0 +1,257 @@
+name: Order Management
+version: "1.0"
+domain_context: |
+  ECサイトの注文管理システム。
+  決済はStripe連携、配送は外部配送API（ヤマト運輸等）と連携。
+  在庫はリアルタイム引当方式（注文確定時に在庫を確保し、キャンセル時に解放）。
+  ユーザーはWebブラウザまたはモバイルアプリからアクセス。
+
+states:
+  pending_payment:
+    description: "注文が作成され、決済待ちの状態"
+  paid:
+    description: "決済が完了し、出荷準備待ちの状態"
+  preparing:
+    description: "倉庫で出荷準備中の状態"
+  shipped:
+    description: "出荷済みで配送中の状態"
+  delivered:
+    description: "配達完了の状態"
+  cancelled:
+    description: "注文がキャンセルされた状態（終端）"
+  refunded:
+    description: "返金処理が完了した状態（終端）"
+
+rows:
+  - id: t1
+    from: pending_payment
+    to: paid
+    trigger: payment_completed
+    description: "Stripeからの決済完了webhook受信"
+
+  - id: t2
+    from: pending_payment
+    to: cancelled
+    trigger: payment_timeout_or_user_cancel
+    description: "決済タイムアウト（30分）またはユーザーによるキャンセル"
+
+  - id: t3
+    from: paid
+    to: preparing
+    trigger: warehouse_accepted
+    description: "倉庫システムが注文を受け付け、ピッキング開始"
+
+  - id: t4
+    from: paid
+    to: cancelled
+    trigger: user_cancel_before_ship
+    description: "出荷前のユーザーキャンセル要求"
+
+  - id: t5
+    from: preparing
+    to: shipped
+    trigger: tracking_number_assigned
+    description: "配送業者からトラッキング番号が割り当てられた"
+
+  - id: t6
+    from: shipped
+    to: delivered
+    trigger: delivery_confirmed
+    description: "配送業者からの配達完了通知"
+
+  - id: t7
+    from: delivered
+    to: refunded
+    trigger: return_approved
+    description: "返品申請が承認され、返金処理を実行"
+
+  - id: t8
+    from: paid
+    to: refunded
+    trigger: admin_refund
+    description: "管理者による手動返金（不具合等）"
+
+paths:
+  - id: happy_path
+    sequence: [t1, t3, t5, t6]
+    description: "正常フロー: 決済→出荷準備→出荷→配達"
+  - id: cancel_after_payment
+    sequence: [t1, t4]
+    description: "決済完了後のユーザーキャンセル"
+  - id: return_flow
+    sequence: [t1, t3, t5, t6, t7]
+    description: "購入→配達→返品返金の全フロー"
+  - id: timeout_cancel
+    sequence: [t2]
+    description: "決済タイムアウトによるキャンセル"
+  - id: admin_refund_flow
+    sequence: [t1, t8]
+    description: "決済完了後の管理者手動返金"
+
+# 検証の関心軸（concern axis）
+# 各遷移 × 各concern で1つの検証セルが生成される
+columns:
+  - id: preconditions
+    prompt_template: |
+      以下の状態遷移について、この遷移が許可される前提条件を列挙してください。
+      また、不正な遷移を防ぐためのガード条件を具体的に示してください。
+
+      遷移: {from} → {to}
+      トリガー: {trigger}
+      説明: {transition_description}
+
+      ドメインコンテキスト:
+      {domain_context}
+
+      以下のJSON形式で回答してください:
+      {{
+        "preconditions": ["条件1", "条件2", ...],
+        "guard_checks": ["チェック1", "チェック2", ...],
+        "risk_notes": "特に注意すべきリスクがあれば記述"
+      }}
+
+  - id: side_effects
+    prompt_template: |
+      以下の状態遷移が実行される際に必要な副作用（DB更新、外部API呼び出し、
+      イベント発行、キュー投入など）を全て列挙してください。
+      実行順序も考慮してください。
+
+      遷移: {from} → {to}
+      トリガー: {trigger}
+      説明: {transition_description}
+
+      ドメインコンテキスト:
+      {domain_context}
+
+      以下のJSON形式で回答してください:
+      {{
+        "side_effects": [
+          {{"action": "説明", "type": "db|api|event|queue", "order": 1}},
+          ...
+        ],
+        "atomicity_notes": "これらの副作用のトランザクション戦略"
+      }}
+
+  - id: error_handling
+    prompt_template: |
+      以下の状態遷移の処理中にエラーが発生した場合の対処方針を検討してください。
+      外部API障害、DB障害、タイムアウト、部分的成功の各ケースを考慮してください。
+
+      遷移: {from} → {to}
+      トリガー: {trigger}
+      説明: {transition_description}
+
+      ドメインコンテキスト:
+      {domain_context}
+
+      以下のJSON形式で回答してください:
+      {{
+        "error_scenarios": [
+          {{"scenario": "説明", "handling": "対処方法", "severity": "high|medium|low"}}
+        ],
+        "retry_strategy": "リトライ戦略",
+        "partial_failure_handling": "部分的成功時の対応"
+      }}
+
+  - id: rollback
+    prompt_template: |
+      以下の状態遷移が完了した後に、取り消しが必要になった場合の対応を検討してください。
+      何を元に戻す必要があるか、元に戻せないものは何か、補償トランザクションは必要かを考慮してください。
+
+      遷移: {from} → {to}
+      トリガー: {trigger}
+      説明: {transition_description}
+
+      ドメインコンテキスト:
+      {domain_context}
+
+      以下のJSON形式で回答してください:
+      {{
+        "reversible_actions": ["戻せるアクション1", ...],
+        "irreversible_actions": ["戻せないアクション1", ...],
+        "compensating_transactions": ["補償トランザクション1", ...],
+        "manual_intervention_needed": true/false,
+        "notes": "補足"
+      }}
+
+  - id: notifications
+    prompt_template: |
+      以下の状態遷移が発生した際に、誰に何をどの手段で通知すべきか検討してください。
+      ユーザー、管理者、外部システムそれぞれについて考慮してください。
+
+      遷移: {from} → {to}
+      トリガー: {trigger}
+      説明: {transition_description}
+
+      ドメインコンテキスト:
+      {domain_context}
+
+      以下のJSON形式で回答してください:
+      {{
+        "notifications": [
+          {{"recipient": "対象", "channel": "email|push|slack|webhook", "content_summary": "内容概要", "timing": "同期|非同期"}}
+        ]
+      }}
+
+  - id: permissions
+    prompt_template: |
+      以下の状態遷移を実行できるアクター（ユーザー、管理者、システム、外部サービス）と
+      必要な認可チェックを検討してください。
+
+      遷移: {from} → {to}
+      トリガー: {trigger}
+      説明: {transition_description}
+
+      ドメインコンテキスト:
+      {domain_context}
+
+      以下のJSON形式で回答してください:
+      {{
+        "allowed_actors": [
+          {{"actor": "アクター名", "role_or_condition": "ロールまたは条件"}}
+        ],
+        "auth_checks": ["チェック1", ...],
+        "audit_logging": "監査ログに記録すべき情報"
+      }}
+
+  - id: concurrency
+    prompt_template: |
+      以下の状態遷移が同時に複数回呼び出された場合、または他の遷移と同時に実行された場合に
+      何が起きるか検討してください。競合状態とその防止策を考慮してください。
+
+      遷移: {from} → {to}
+      トリガー: {trigger}
+      説明: {transition_description}
+
+      ドメインコンテキスト:
+      {domain_context}
+
+      以下のJSON形式で回答してください:
+      {{
+        "race_conditions": [
+          {{"scenario": "競合シナリオ", "risk": "リスク", "mitigation": "防止策"}}
+        ],
+        "locking_strategy": "ロック戦略（楽観的/悲観的/etc）",
+        "idempotency": "冪等性の担保方法"
+      }}
+
+  - id: data_integrity
+    prompt_template: |
+      以下の状態遷移が完了した後に満たされるべきデータの不変条件（invariant）を列挙してください。
+      遷移後のデータ整合性を検証するためのチェック項目を考慮してください。
+
+      遷移: {from} → {to}
+      トリガー: {trigger}
+      説明: {transition_description}
+
+      ドメインコンテキスト:
+      {domain_context}
+
+      以下のJSON形式で回答してください:
+      {{
+        "invariants": [
+          {{"condition": "不変条件", "check_query": "検証SQLまたはロジック概要"}}
+        ],
+        "consistency_level": "強整合性が必要か結果整合性で良いか",
+        "monitoring": "監視すべきメトリクス"
+      }}

@@ -1,0 +1,152 @@
+name: External API Error Handling
+version: "1.0"
+domain_context: |
+  ECサイトの外部API連携エラーハンドリング検証。
+  連携先API: Stripe（決済）, Yamato（配送）, Inventory（在庫管理）
+  障害パターン: timeout, auth_error, rate_limit, partial_success, 5xx, network_error
+  業務状態: pending_payment, paid, preparing, shipped, delivered
+
+rows:
+  # Stripe × 障害パターン
+  - id: stripe_timeout
+    api: Stripe
+    failure: timeout
+    description: "Stripe APIのタイムアウト（30秒超）"
+
+  - id: stripe_auth
+    api: Stripe
+    failure: auth_error
+    description: "Stripe APIキーの失効・不正"
+
+  - id: stripe_rate
+    api: Stripe
+    failure: rate_limit
+    description: "Stripe APIのレート制限（429）"
+
+  - id: stripe_partial
+    api: Stripe
+    failure: partial_success
+    description: "Stripe PaymentIntent作成成功→Capture失敗"
+
+  # Yamato × 障害パターン
+  - id: yamato_timeout
+    api: Yamato
+    failure: timeout
+    description: "ヤマト配送APIのタイムアウト"
+
+  - id: yamato_5xx
+    api: Yamato
+    failure: 5xx
+    description: "ヤマト配送APIのサーバーエラー"
+
+  - id: yamato_network
+    api: Yamato
+    failure: network_error
+    description: "ヤマト配送APIへのネットワーク到達不能"
+
+  # Inventory × 障害パターン
+  - id: inventory_timeout
+    api: Inventory
+    failure: timeout
+    description: "在庫管理APIのタイムアウト"
+
+  - id: inventory_partial
+    api: Inventory
+    failure: partial_success
+    description: "在庫引当の部分成功（一部商品のみ確保）"
+
+  - id: inventory_5xx
+    api: Inventory
+    failure: 5xx
+    description: "在庫管理APIのサーバーエラー"
+
+paths:
+  - id: payment_flow_stripe_fail
+    sequence: [stripe_timeout, stripe_auth]
+    description: "Stripe障害の連鎖: タイムアウト後に認証エラー（キーローテーション失敗）"
+
+columns:
+  - id: during_payment
+    prompt_template: |
+      以下の外部API障害が「決済処理中（pending_payment→paid）」に発生した場合の対応を検証してください。
+
+      API: {api}
+      障害パターン: {failure}
+      説明: {description}
+
+      {verified_context}
+
+      コンテキスト: {domain_context}
+
+      JSON形式で回答:
+      {{
+        "impact": "業務への影響",
+        "immediate_action": "即時対応",
+        "retry_strategy": "リトライ戦略",
+        "fallback": "フォールバック手段",
+        "user_communication": "ユーザーへの通知内容",
+        "data_consistency": "データ整合性の担保方法"
+      }}
+
+  - id: during_fulfillment
+    prompt_template: |
+      以下の外部API障害が「出荷処理中（paid→preparing→shipped）」に発生した場合の対応を検証してください。
+
+      API: {api}
+      障害パターン: {failure}
+      説明: {description}
+
+      {verified_context}
+
+      コンテキスト: {domain_context}
+
+      JSON形式で回答:
+      {{
+        "impact": "業務への影響",
+        "immediate_action": "即時対応",
+        "retry_strategy": "リトライ戦略",
+        "order_state_handling": "注文ステータスの扱い",
+        "warehouse_coordination": "倉庫との調整方法"
+      }}
+
+  - id: during_refund
+    prompt_template: |
+      以下の外部API障害が「返金処理中（*→refunded）」に発生した場合の対応を検証してください。
+
+      API: {api}
+      障害パターン: {failure}
+      説明: {description}
+
+      {verified_context}
+
+      コンテキスト: {domain_context}
+
+      JSON形式で回答:
+      {{
+        "impact": "業務への影響",
+        "immediate_action": "即時対応",
+        "money_safety": "金銭的リスクの回避方法",
+        "customer_impact": "顧客への影響と対応",
+        "reconciliation": "事後の突合・リコンサイル方法"
+      }}
+
+  - id: monitoring_alerting
+    prompt_template: |
+      以下の外部API障害を検知・対応するための監視とアラートを検証してください。
+
+      API: {api}
+      障害パターン: {failure}
+      説明: {description}
+
+      {verified_context}
+
+      コンテキスト: {domain_context}
+
+      JSON形式で回答:
+      {{
+        "detection_method": "障害検知方法",
+        "alert_threshold": "アラート閾値",
+        "escalation_path": "エスカレーション経路",
+        "auto_mitigation": "自動緩和策",
+        "dashboard_metrics": ["監視すべきメトリクス"]
+      }}

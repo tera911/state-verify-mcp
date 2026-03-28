@@ -1,0 +1,124 @@
+name: Schema Migration Verification
+version: "1.0"
+domain_context: |
+  usersテーブルのスキーマ変更マイグレーション検証。
+  変更内容: nameカラム分割（name→first_name+last_name）、email正規化、
+  phone追加（nullable）、created_at NOT NULL制約追加、role ENUMの値追加。
+  本番データに古い不整合レコードが存在する前提で検証。
+
+rows:
+  - id: name_split
+    table: users
+    column: name -> first_name, last_name
+    change_type: split
+    description: "単一nameカラムをfirst_name+last_nameに分割"
+
+  - id: email_normalize
+    table: users
+    column: email
+    change_type: transform
+    description: "メールアドレスの小文字正規化+trim"
+
+  - id: phone_add
+    table: users
+    column: phone
+    change_type: add_nullable
+    description: "phoneカラムをNULLABLEで追加"
+
+  - id: created_at_not_null
+    table: users
+    column: created_at
+    change_type: add_constraint
+    description: "created_atにNOT NULL制約追加（既存NULLレコードあり）"
+
+  - id: role_enum_extend
+    table: users
+    column: role
+    change_type: enum_extend
+    description: "roleのENUM値に'moderator'を追加"
+
+columns:
+  - id: null_handling
+    prompt_template: |
+      以下のマイグレーションで、NULL値や空値のレコードをどう扱うか検証してください。
+
+      テーブル: {table}
+      カラム: {column}
+      変更種別: {change_type}
+      説明: {description}
+
+      {verified_context}
+
+      コンテキスト: {domain_context}
+
+      JSON形式で回答:
+      {{
+        "existing_nulls": "既存NULLレコードの件数想定と変換方針",
+        "default_value": "デフォルト値の選択とその根拠",
+        "migration_sql": "具体的なSQL（UPDATE + ALTER）",
+        "rollback_sql": "ロールバック用SQL"
+      }}
+
+  - id: invalid_data
+    prompt_template: |
+      以下のマイグレーションで、既存の不正データをどう扱うか検証してください。
+
+      テーブル: {table}
+      カラム: {column}
+      変更種別: {change_type}
+      説明: {description}
+
+      {verified_context}
+
+      コンテキスト: {domain_context}
+
+      JSON形式で回答:
+      {{
+        "invalid_patterns": ["想定される不正データパターン"],
+        "cleanup_strategy": "クリーンアップ戦略",
+        "migration_sql": "具体的な変換SQL",
+        "validation_query": "マイグレーション後の検証クエリ"
+      }}
+
+  - id: fk_cascade
+    prompt_template: |
+      以下のマイグレーションが外部キー制約やカスケード削除に与える影響を検証してください。
+
+      テーブル: {table}
+      カラム: {column}
+      変更種別: {change_type}
+      説明: {description}
+
+      {verified_context}
+
+      コンテキスト: {domain_context}
+
+      JSON形式で回答:
+      {{
+        "affected_tables": ["影響を受けるテーブル"],
+        "fk_constraints": ["関連する外部キー制約"],
+        "cascade_risk": "カスケード影響のリスク評価",
+        "migration_order": "テーブル間のマイグレーション順序"
+      }}
+
+  - id: rollback_safety
+    prompt_template: |
+      以下のマイグレーションのロールバック可能性を検証してください。
+
+      テーブル: {table}
+      カラム: {column}
+      変更種別: {change_type}
+      説明: {description}
+
+      {verified_context}
+
+      コンテキスト: {domain_context}
+
+      JSON形式で回答:
+      {{
+        "reversible": true,
+        "rollback_sql": "ロールバックSQL",
+        "data_loss_on_rollback": "ロールバック時のデータ損失リスク",
+        "downtime_required": "ダウンタイムの必要性",
+        "blue_green_compatible": "ブルーグリーンデプロイ対応可否"
+      }}

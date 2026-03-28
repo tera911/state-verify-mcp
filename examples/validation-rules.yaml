@@ -1,0 +1,158 @@
+name: Form Validation Rules
+version: "1.0"
+domain_context: |
+  イベント予約フォームのバリデーションルール検証。
+  フィールド: event_name, start_date, end_date, country, state, ticket_count,
+  discount_rate, approver, payment_method, email
+  フィールド間の依存関係や条件付き必須を網羅的に検証する。
+
+rows:
+  - id: start_end_date
+    field_a: start_date
+    field_b: end_date
+    relationship: "開始日 < 終了日"
+    description: "開始日と終了日の時系列整合性"
+
+  - id: country_state
+    field_a: country
+    field_b: state
+    relationship: "国がUSなら州は必須"
+    description: "国コードに応じた州フィールドの条件付き必須"
+
+  - id: discount_approver
+    field_a: discount_rate
+    field_b: approver
+    relationship: "割引率が50%超なら承認者が必須"
+    description: "高割引率の承認フロー要求"
+
+  - id: ticket_discount
+    field_a: ticket_count
+    field_b: discount_rate
+    relationship: "チケット数0なら割引率は無効"
+    description: "チケット数と割引率の整合性"
+
+  - id: payment_email
+    field_a: payment_method
+    field_b: email
+    relationship: "オンライン決済ならメール必須"
+    description: "決済方法に応じたメールアドレスの条件付き必須"
+
+  - id: start_date_future
+    field_a: start_date
+    field_b: now
+    relationship: "開始日は未来日であること"
+    description: "開始日の未来日バリデーション"
+
+  - id: end_date_range
+    field_a: start_date
+    field_b: end_date
+    relationship: "期間が365日以内"
+    description: "イベント期間の上限チェック"
+
+columns:
+  - id: null_handling
+    prompt_template: |
+      以下のフィールド間バリデーションについて、NULL/空値のハンドリングを検証してください。
+
+      フィールドA: {field_a}
+      フィールドB: {field_b}
+      関係: {relationship}
+      説明: {description}
+
+      {verified_context}
+
+      コンテキスト: {domain_context}
+
+      検証観点:
+      - field_aがNULLの場合、このルールはどう評価されるべきか
+      - field_bがNULLの場合はどうか
+      - 両方NULLの場合はどうか
+      - 空文字列とNULLは区別すべきか
+
+      JSON形式で回答:
+      {{
+        "a_null": {{"behavior": "スキップ|エラー|デフォルト値", "reason": "理由"}},
+        "b_null": {{"behavior": "スキップ|エラー|デフォルト値", "reason": "理由"}},
+        "both_null": {{"behavior": "スキップ|エラー", "reason": "理由"}},
+        "empty_vs_null": "区別の必要性と方針"
+      }}
+
+  - id: boundary_values
+    prompt_template: |
+      以下のフィールド間バリデーションについて、境界値を検証してください。
+
+      フィールドA: {field_a}
+      フィールドB: {field_b}
+      関係: {relationship}
+      説明: {description}
+
+      {verified_context}
+
+      コンテキスト: {domain_context}
+
+      検証観点:
+      - ちょうど境界値（例: start_date == end_date）の場合
+      - 境界値±1の場合
+      - 型の最大値/最小値の場合
+      - タイムゾーンの境界
+
+      JSON形式で回答:
+      {{
+        "boundary_cases": [
+          {{"input": "入力例", "expected": "期待結果", "edge_case": true}}
+        ],
+        "timezone_considerations": "タイムゾーン考慮事項"
+      }}
+
+  - id: type_mismatch
+    prompt_template: |
+      以下のフィールド間バリデーションについて、型不一致のケースを検証してください。
+
+      フィールドA: {field_a}
+      フィールドB: {field_b}
+      関係: {relationship}
+      説明: {description}
+
+      {verified_context}
+
+      コンテキスト: {domain_context}
+
+      検証観点:
+      - 文字列として日付が渡された場合のパース
+      - 数値フィールドに文字列が渡された場合
+      - APIとフォームで型が異なる場合
+
+      JSON形式で回答:
+      {{
+        "type_scenarios": [
+          {{"input_type": "実際の型", "expected_type": "期待型", "handling": "対応方法"}}
+        ],
+        "api_vs_form": "APIとフォーム入力の型差異"
+      }}
+
+  - id: dependency_rules
+    prompt_template: |
+      以下のフィールド間バリデーションについて、依存ルールの網羅性を検証してください。
+
+      フィールドA: {field_a}
+      フィールドB: {field_b}
+      関係: {relationship}
+      説明: {description}
+
+      {verified_context}
+
+      コンテキスト: {domain_context}
+
+      検証観点:
+      - この依存関係は双方向か片方向か
+      - 第三のフィールドが影響するケースはないか
+      - バリデーション順序（field_aを先に検証？同時？）
+      - 更新時の再バリデーション（field_aを変更したらfield_bの検証をやり直すか）
+
+      JSON形式で回答:
+      {{
+        "direction": "片方向|双方向",
+        "third_party_fields": ["影響する第三フィールド"],
+        "validation_order": "推奨される検証順序",
+        "update_revalidation": "更新時の再バリデーション戦略"
+      }}

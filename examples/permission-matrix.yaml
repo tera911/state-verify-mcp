@@ -1,0 +1,173 @@
+name: CMS Permission Matrix
+version: "1.0"
+domain_context: |
+  CMSアプリケーションの権限マトリクス。
+  ロール: admin(管理者), editor(編集者), author(著者), viewer(閲覧者), anonymous(匿名)
+  リソース: user, published_article, draft_article, media, settings, analytics
+  各ロール×リソースの組み合わせについて、CRUD操作の許可/拒否を検証する。
+
+rows:
+  - id: admin_user
+    role: admin
+    resource: user
+    description: "管理者 → ユーザーリソース"
+
+  - id: admin_draft
+    role: admin
+    resource: draft_article
+    description: "管理者 → ドラフト記事"
+
+  - id: editor_published
+    role: editor
+    resource: published_article
+    description: "編集者 → 公開記事"
+
+  - id: editor_draft
+    role: editor
+    resource: draft_article
+    description: "編集者 → ドラフト記事"
+
+  - id: author_draft
+    role: author
+    resource: draft_article
+    description: "著者 → ドラフト記事（自分の記事のみ？）"
+
+  - id: author_published
+    role: author
+    resource: published_article
+    description: "著者 → 公開記事（自分の記事のみ？）"
+
+  - id: viewer_published
+    role: viewer
+    resource: published_article
+    description: "閲覧者 → 公開記事"
+
+  - id: viewer_draft
+    role: viewer
+    resource: draft_article
+    description: "閲覧者 → ドラフト記事（グレーゾーン）"
+
+  - id: anonymous_published
+    role: anonymous
+    resource: published_article
+    description: "匿名ユーザー → 公開記事"
+
+  - id: viewer_settings
+    role: viewer
+    resource: settings
+    description: "閲覧者 → システム設定"
+
+  - id: editor_analytics
+    role: editor
+    resource: analytics
+    description: "編集者 → アナリティクス"
+
+  - id: anonymous_media
+    role: anonymous
+    resource: media
+    description: "匿名ユーザー → メディアファイル"
+
+columns:
+  - id: create
+    prompt_template: |
+      以下のロール×リソースの組み合わせについて、CREATE（作成）操作の権限を検証してください。
+
+      ロール: {role}
+      リソース: {resource}
+      説明: {description}
+
+      コンテキスト:
+      {domain_context}
+
+      検証観点:
+      - このロールはこのリソースを新規作成できるべきか？
+      - 作成可能な場合、制限はあるか？（自分のリソースのみ、承認フロー必要、等）
+      - 作成不可の場合、UIレベルでボタンを非表示にすべきか、クリック後にエラーにすべきか？
+
+      以下のJSON形式で回答:
+      {{
+        "allowed": true,
+        "conditions": ["条件1", "条件2"],
+        "ui_behavior": "ボタン表示方針",
+        "edge_cases": ["エッジケース"],
+        "risk_notes": "リスクメモ"
+      }}
+
+  - id: read
+    prompt_template: |
+      以下のロール×リソースの組み合わせについて、READ（閲覧）操作の権限を検証してください。
+
+      ロール: {role}
+      リソース: {resource}
+      説明: {description}
+
+      コンテキスト:
+      {domain_context}
+
+      検証観点:
+      - このロールはこのリソースを閲覧できるべきか？
+      - 閲覧可能な場合、フィルタリングが必要か？（自分のリソースのみ、特定フィールド非表示、等）
+      - 一覧表示と詳細表示で権限が異なるか？
+
+      以下のJSON形式で回答:
+      {{
+        "allowed": true,
+        "scope": "all|own|none",
+        "field_restrictions": ["非表示にすべきフィールド"],
+        "list_vs_detail": "一覧/詳細の権限差異",
+        "edge_cases": ["エッジケース"]
+      }}
+
+  - id: update
+    prompt_template: |
+      以下のロール×リソースの組み合わせについて、UPDATE（更新）操作の権限を検証してください。
+
+      ロール: {role}
+      リソース: {resource}
+      説明: {description}
+
+      コンテキスト:
+      {domain_context}
+
+      検証観点:
+      - このロールはこのリソースを更新できるべきか？
+      - 更新可能なフィールドに制限はあるか？
+      - 承認フローは必要か？（下書き→公開の遷移等）
+      - 他人のリソースも更新できるか？
+
+      以下のJSON形式で回答:
+      {{
+        "allowed": true,
+        "scope": "all|own|none",
+        "field_restrictions": ["更新不可フィールド"],
+        "approval_required": false,
+        "edge_cases": ["エッジケース"]
+      }}
+
+  - id: delete
+    prompt_template: |
+      以下のロール×リソースの組み合わせについて、DELETE（削除）操作の権限を検証してください。
+
+      ロール: {role}
+      リソース: {resource}
+      説明: {description}
+
+      コンテキスト:
+      {domain_context}
+
+      検証観点:
+      - このロールはこのリソースを削除できるべきか？
+      - 物理削除か論理削除か？
+      - 削除に承認は必要か？
+      - カスケード削除の影響範囲は？
+      - 他人のリソースも削除できるか？
+
+      以下のJSON形式で回答:
+      {{
+        "allowed": true,
+        "scope": "all|own|none",
+        "soft_delete": true,
+        "approval_required": false,
+        "cascade_effects": ["影響を受けるリソース"],
+        "edge_cases": ["エッジケース"]
+      }}

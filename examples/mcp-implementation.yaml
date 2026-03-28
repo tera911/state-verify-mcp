@@ -1,0 +1,273 @@
+name: MCP Tool Implementation
+version: "1.0"
+domain_context: |
+  MCPサーバー（Model Context Protocol）のツール実装の検証。
+  サーバーはstdioトランスポートでClaude Codeと通信する。
+  FastMCP (Python SDK) を使用し、各ツールはJSON文字列を返す。
+  ステートはファイルシステム上のJSONファイルに永続化される。
+
+  検証対象のツール一覧:
+  - sv_enumerate: マトリクス表示
+  - sv_next: 次の未検証セル取得
+  - sv_prompt: 特定セルのプロンプト取得
+  - sv_record: 検証結果の記録
+  - sv_coverage: カバレッジレポート
+  - sv_tlaplus: TLA+仕様生成
+  - sv_batch_prompts: 全未検証プロンプト取得
+  - sv_export: レポートエクスポート
+  - sv_reset: データリセット
+
+states:
+  no_spec:
+    description: "specファイルが指定されていない、または存在しない状態"
+  initialized:
+    description: "specファイルが正常にロードされ、マトリクスが生成可能な状態"
+  partial_verified:
+    description: "一部のセルが検証済みだが、まだ完了していない状態"
+  fully_verified:
+    description: "全セルが検証済み（coverage 100%）の状態"
+  exported:
+    description: "検証結果がレポートとしてエクスポートされた状態"
+  reset:
+    description: "検証データがクリアされ、initializedに戻った状態"
+
+rows:
+  - id: t1
+    from: no_spec
+    to: initialized
+    trigger: load_valid_spec
+    description: "有効なYAML specファイルのパスが設定され、サーバーが起動"
+
+  - id: t2
+    from: no_spec
+    to: no_spec
+    trigger: load_invalid_spec
+    description: "不正なspecファイルパスの指定（存在しない、不正YAML等）"
+
+  - id: t3
+    from: initialized
+    to: partial_verified
+    trigger: first_record
+    description: "最初のsv_recordが成功し、1つ以上のセルが検証済みに"
+
+  - id: t4
+    from: partial_verified
+    to: partial_verified
+    trigger: additional_record
+    description: "追加のsv_recordが成功（ただし全セル完了前）"
+
+  - id: t5
+    from: partial_verified
+    to: fully_verified
+    trigger: final_record
+    description: "最後のsv_recordが成功し、全セルが検証済みに"
+
+  - id: t6
+    from: initialized
+    to: initialized
+    trigger: enumerate_or_query
+    description: "sv_enumerate, sv_next, sv_prompt, sv_batch_prompts等の参照系ツール呼び出し"
+
+  - id: t7
+    from: partial_verified
+    to: partial_verified
+    trigger: query_during_verification
+    description: "検証途中でのsv_coverage, sv_next等の参照系呼び出し"
+
+  - id: t8
+    from: fully_verified
+    to: exported
+    trigger: export_report
+    description: "sv_exportでレポート出力"
+
+  - id: t9
+    from: partial_verified
+    to: exported
+    trigger: export_partial
+    description: "検証途中でのsv_exportでレポート出力（部分的な結果）"
+
+  - id: t10
+    from: fully_verified
+    to: initialized
+    trigger: reset_after_complete
+    description: "sv_resetで全検証データをクリア"
+
+  - id: t11
+    from: partial_verified
+    to: initialized
+    trigger: reset_during_verification
+    description: "検証途中でsv_resetを実行"
+
+  - id: t12
+    from: fully_verified
+    to: fully_verified
+    trigger: next_when_complete
+    description: "全セル検証済みの状態でsv_nextを呼び出し"
+
+  - id: t13
+    from: initialized
+    to: initialized
+    trigger: record_invalid_cell
+    description: "存在しないtransition_idやconcern_idでsv_recordを呼び出し"
+
+  - id: t14
+    from: partial_verified
+    to: partial_verified
+    trigger: record_duplicate
+    description: "既に検証済みのセルに再度sv_recordを呼び出し（上書き）"
+
+columns:
+  - id: input_validation
+    prompt_template: |
+      以下のMCPツール状態遷移について、入力バリデーションを検証してください。
+
+      遷移: {from} → {to}
+      トリガー: {trigger}
+      説明: {transition_description}
+
+      コンテキスト:
+      {domain_context}
+
+      検証観点:
+      - 各ツールのパラメータに不正値が渡された場合の挙動
+      - 必須パラメータの欠落時のエラーメッセージ
+      - specファイルパスが不正な場合の挙動
+      - JSON形式でない文字列がresponse_jsonに渡された場合
+
+      以下のJSON形式で回答:
+      {{
+        "validation_checks": [
+          {{"input": "不正入力の例", "expected_behavior": "期待される挙動", "tested": false}}
+        ],
+        "edge_cases": ["エッジケース1", ...],
+        "missing_validations": ["不足しているバリデーション", ...]
+      }}
+
+  - id: error_response
+    prompt_template: |
+      以下のMCPツール状態遷移について、エラーレスポンスの適切性を検証してください。
+
+      遷移: {from} → {to}
+      トリガー: {trigger}
+      説明: {transition_description}
+
+      コンテキスト:
+      {domain_context}
+
+      検証観点:
+      - エラー時のレスポンス形式は一貫しているか（JSON構造）
+      - エラーメッセージは具体的で対処可能か
+      - MCPプロトコルのエラーハンドリング規約に準拠しているか
+      - 例外がMCPフレームワーク外にリークしていないか
+
+      以下のJSON形式で回答:
+      {{
+        "error_scenarios": [
+          {{"scenario": "エラーシナリオ", "current_response": "現在の応答", "adequate": true/false, "improvement": "改善案"}}
+        ],
+        "protocol_compliance": "MCPプロトコル準拠状況",
+        "unhandled_exceptions": ["未処理の例外パス", ...]
+      }}
+
+  - id: state_consistency
+    prompt_template: |
+      以下のMCPツール状態遷移について、状態の整合性を検証してください。
+
+      遷移: {from} → {to}
+      トリガー: {trigger}
+      説明: {transition_description}
+
+      コンテキスト:
+      {domain_context}
+
+      検証観点:
+      - ツール呼び出し前後でファイルシステム上のstoreの整合性は保たれるか
+      - 途中でプロセスが終了した場合、storeが壊れないか
+      - verified.jsonのスキーマは一貫しているか
+      - 同一セルへの再record時の挙動は適切か
+
+      以下のJSON形式で回答:
+      {{
+        "consistency_checks": [
+          {{"check": "チェック内容", "status": "ok|concern|fail", "detail": "詳細"}}
+        ],
+        "crash_safety": "クラッシュ時のデータ安全性評価",
+        "schema_issues": ["スキーマの問題点", ...]
+      }}
+
+  - id: idempotency
+    prompt_template: |
+      以下のMCPツール状態遷移について、冪等性を検証してください。
+
+      遷移: {from} → {to}
+      トリガー: {trigger}
+      説明: {transition_description}
+
+      コンテキスト:
+      {domain_context}
+
+      検証観点:
+      - 同じツールを同じパラメータで2回連続呼び出した場合、結果は一貫しているか
+      - 参照系ツール（enumerate, next, coverage）は副作用がないか
+      - record の再呼び出し（上書き）は意図通りの挙動か
+      - reset後のresetは安全か
+
+      以下のJSON形式で回答:
+      {{
+        "idempotency_tests": [
+          {{"tool": "ツール名", "scenario": "シナリオ", "idempotent": true/false, "notes": "備考"}}
+        ],
+        "side_effect_analysis": "副作用の分析"
+      }}
+
+  - id: output_contract
+    prompt_template: |
+      以下のMCPツール状態遷移について、出力の契約（型・構造）を検証してください。
+
+      遷移: {from} → {to}
+      トリガー: {trigger}
+      説明: {transition_description}
+
+      コンテキスト:
+      {domain_context}
+
+      検証観点:
+      - 各ツールのJSON出力に必須フィールドは常に含まれるか
+      - statusフィールドの値は一貫したenum的な値か
+      - LLM（Claude）が出力を正しくパースできる構造か
+      - エラー時とSuccess時で構造が大きく変わらないか
+
+      以下のJSON形式で回答:
+      {{
+        "output_fields": [
+          {{"tool": "ツール名", "field": "フィールド名", "always_present": true/false, "type": "型"}}
+        ],
+        "inconsistencies": ["不整合な出力パターン", ...],
+        "llm_parsability": "LLMがパースしやすいか評価"
+      }}
+
+  - id: concurrency
+    prompt_template: |
+      以下のMCPツール状態遷移について、並行性の問題を検証してください。
+
+      遷移: {from} → {to}
+      トリガー: {trigger}
+      説明: {transition_description}
+
+      コンテキスト:
+      {domain_context}
+
+      検証観点:
+      - 複数のClaude Codeセッションが同時に同じspecファイルを操作した場合
+      - recordとnextが同時に呼ばれた場合のrace condition
+      - ファイルロックの有無と必要性
+      - stdioトランスポートでの同時リクエスト処理
+
+      以下のJSON形式で回答:
+      {{
+        "race_conditions": [
+          {{"scenario": "競合シナリオ", "risk_level": "high|medium|low", "mitigation": "対策"}}
+        ],
+        "file_locking": "ファイルロック戦略の評価",
+        "transport_safety": "stdioトランスポートの安全性"
+      }}

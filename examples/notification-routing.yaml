@@ -1,0 +1,175 @@
+name: Notification Routing Rules
+version: "1.0"
+domain_context: |
+  ECサイトの通知ルーティング検証。
+  イベント: order_placed, payment_completed, order_shipped, order_delivered,
+  order_cancelled, refund_completed, review_requested
+  チャネル: email, push, sms, slack, webhook
+  ユーザー設定: opt_in/opt_out, quiet_hours(22:00-08:00), frequency_limit(1h)
+  ロケール: ja, en, zh
+
+rows:
+  # イベント × チャネル
+  - id: payment_email
+    event: payment_completed
+    channel: email
+    description: "決済完了 → メール通知"
+
+  - id: payment_push
+    event: payment_completed
+    channel: push
+    description: "決済完了 → プッシュ通知"
+
+  - id: shipped_email
+    event: order_shipped
+    channel: email
+    description: "出荷完了 → メール（トラッキングURL付き）"
+
+  - id: shipped_push
+    event: order_shipped
+    channel: push
+    description: "出荷完了 → プッシュ通知"
+
+  - id: shipped_sms
+    event: order_shipped
+    channel: sms
+    description: "出荷完了 → SMS（オプトイン時のみ）"
+
+  - id: delivered_email
+    event: order_delivered
+    channel: email
+    description: "配達完了 → メール"
+
+  - id: delivered_push
+    event: order_delivered
+    channel: push
+    description: "配達完了 → プッシュ"
+
+  - id: cancelled_email
+    event: order_cancelled
+    channel: email
+    description: "キャンセル → メール（返金情報付き）"
+
+  - id: refund_email
+    event: refund_completed
+    channel: email
+    description: "返金完了 → メール"
+
+  - id: review_email
+    event: review_requested
+    channel: email
+    description: "レビュー依頼 → メール（配達3日後）"
+
+  - id: review_push
+    event: review_requested
+    channel: push
+    description: "レビュー依頼 → プッシュ（配達3日後）"
+
+  - id: cancelled_slack
+    event: order_cancelled
+    channel: slack
+    description: "キャンセル → Slack（運用チーム向け）"
+
+columns:
+  - id: opt_out
+    prompt_template: |
+      以下の通知ルートについて、オプトアウト時の挙動を検証してください。
+
+      イベント: {event}
+      チャネル: {channel}
+      説明: {description}
+
+      {verified_context}
+
+      コンテキスト: {domain_context}
+
+      検証観点:
+      - このチャネルのオプトアウトは許可すべきか（重要な取引通知は強制送信？）
+      - チャネル単位のオプトアウトとイベント単位のオプトアウトの優先順位
+      - オプトアウト時の代替チャネルへのフォールバック
+
+      JSON形式で回答:
+      {{
+        "opt_out_allowed": true,
+        "mandatory_override": "強制送信すべきケース",
+        "fallback_channel": "代替チャネル",
+        "legal_requirement": "法的要件（特商法等）"
+      }}
+
+  - id: quiet_hours
+    prompt_template: |
+      以下の通知ルートについて、夜間時間帯（22:00-08:00）の挙動を検証してください。
+
+      イベント: {event}
+      チャネル: {channel}
+      説明: {description}
+
+      {verified_context}
+
+      コンテキスト: {domain_context}
+
+      検証観点:
+      - 夜間は送信を遅延すべきか、即座に送るべきか
+      - タイムゾーンの扱い（ユーザーのローカル時間？サーバー時間？）
+      - 遅延した場合の送信タイミング（朝8時一括？）
+      - 緊急通知（不正検知等）は夜間でも送るか
+
+      JSON形式で回答:
+      {{
+        "suppress_during_quiet": true,
+        "delay_strategy": "遅延戦略",
+        "timezone_handling": "タイムゾーンの扱い",
+        "urgent_override": "緊急時のオーバーライド条件"
+      }}
+
+  - id: frequency_limit
+    prompt_template: |
+      以下の通知ルートについて、頻度制限の挙動を検証してください。
+
+      イベント: {event}
+      チャネル: {channel}
+      説明: {description}
+
+      {verified_context}
+
+      コンテキスト: {domain_context}
+
+      検証観点:
+      - 同一ユーザーに短時間で同種の通知が複数発生した場合（例: 連続注文）
+      - チャネル横断の頻度制限は必要か
+      - バッチ通知へのダイジェスト化の基準
+      - 重要度による優先順位
+
+      JSON形式で回答:
+      {{
+        "rate_limit": "頻度制限値",
+        "dedup_window": "重複排除ウィンドウ",
+        "digest_strategy": "ダイジェスト化の方針",
+        "priority_override": "優先度による例外"
+      }}
+
+  - id: locale
+    prompt_template: |
+      以下の通知ルートについて、多言語対応を検証してください。
+
+      イベント: {event}
+      チャネル: {channel}
+      説明: {description}
+
+      {verified_context}
+
+      コンテキスト: {domain_context}
+
+      検証観点:
+      - テンプレートの多言語管理方法
+      - ユーザー設定ロケールが未設定の場合のフォールバック
+      - 通貨・日付フォーマットのロケール依存
+      - RTL言語への対応（将来）
+
+      JSON形式で回答:
+      {{
+        "template_management": "テンプレート管理方針",
+        "fallback_locale": "デフォルトロケール",
+        "dynamic_content": "動的コンテンツのi18n方針",
+        "format_considerations": "フォーマット考慮事項"
+      }}

@@ -1,0 +1,375 @@
+name: state-verify Code Behavior
+version: "1.0"
+domain_context: |
+  state-verifyの実装コード（state_verify.py + mcp_server.py）の実際の挙動を検証する。
+  設計意図ではなく、コードが実際に何をするかに焦点を当てる。
+
+  アーキテクチャ:
+  - state_verify.py: コアロジック（load_spec, load_store, save_store, get_all_cells, render_prompt, cell_key）とCLIコマンド群
+  - mcp_server.py: FastMCPラッパー。コアロジックをインポートし、_handle_errorsデコレータで例外をJSON化
+  - ストアファイル: specと同ディレクトリに `.<<stem>>.verified.json` として保存
+  - ファイルI/O: load_storeはfcntl.LOCK_SH、save_storeはtempfile+LOCK_EX+rename（atomic write）
+  - エラーハンドリング: _handle_errorsがValueError/FileNotFoundError/YAMLError/JSONDecodeError/Exceptionをキャッチ
+
+  注目すべき実装詳細:
+  - load_storeはファイル不在時にデフォルトdict（cells空、metadata.created_at付き）を返す（ファイルは作成しない）
+  - save_storeはstore["metadata"]["updated_at"]を更新してからatomic write
+  - get_all_cellsはt.get("trigger", "")とt.get("description", "")でデフォルト値を使用
+  - render_promptはcell辞書からconcern_prompt_templateを除外してformat()に渡す
+  - sv_resetはstore_pathを直接unlink（save_storeを使わない）
+  - sv_tlaplusはFakeArgsとredirect_stdoutでcmd_tlaplusを呼ぶ間接実装
+  - _handle_errorsはasync対応していない（FastMCPが同期ツールをどう扱うかに依存）
+  - cell_keyは単純な文字列連結 "<<transition_id>>:<<concern_id>>"（区切り文字:がIDに含まれると衝突）
+  - sv_recordで不正JSONを受けた場合、raw_textキーでラップして保存しwarningを返す
+  - coverage_percentはtotalが0の場合0を返す（ZeroDivisionError回避）
+  - load_specはyaml.safe_loadの結果がNoneの場合をチェックするが、dictでない場合は未チェック
+
+states:
+  no_store_no_spec:
+    description: "specパスが未設定かつストアファイルが存在しない初期状態"
+  spec_loaded_no_store:
+    description: "specが正常にロード可能だがストアファイルがまだ存在しない状態（load_storeがメモリ上のデフォルトdictを返す）"
+  store_empty:
+    description: "ストアファイルが存在するが cells が空の状態（cells空、metadata付き）"
+  store_partial:
+    description: "ストアファイルが存在し、一部のセルが記録済みの状態（0 < verified < total）"
+  store_full:
+    description: "全セルが記録済みの状態（verified == total）"
+  store_corrupted:
+    description: "ストアファイルが存在するが不正なJSON（json.loadが失敗する状態）"
+  spec_invalid:
+    description: "specファイルが存在するがYAMLパースエラーまたは必須キー不足"
+
+rows:
+  # --- spec解決フェーズ ---
+  - id: t1
+    from: no_store_no_spec
+    to: no_store_no_spec
+    trigger: any_tool_no_spec
+    description: "_resolve_specでspec_pathもSTATE_VERIFY_SPECも未設定の場合、ValueErrorを送出。_handle_errorsがJSON errorレスポンスに変換"
+
+  - id: t2
+    from: no_store_no_spec
+    to: spec_invalid
+    trigger: set_invalid_spec_path
+    description: "存在しないファイルパスを指定→FileNotFoundError、または存在するがYAMLが不正→YAMLError/ValueError"
+
+  - id: t3
+    from: no_store_no_spec
+    to: spec_loaded_no_store
+    trigger: set_valid_spec_path
+    description: "有効なspecファイルパスを指定。load_specが成功しdictを返す。ストアファイルはまだ存在しない"
+
+  # --- spec_invalidからの遷移 ---
+  - id: t4
+    from: spec_invalid
+    to: spec_invalid
+    trigger: any_tool_with_invalid_spec
+    description: "不正specのままツール呼び出し。load_specが毎回失敗しエラーJSONを返す"
+
+  - id: t5
+    from: spec_invalid
+    to: spec_loaded_no_store
+    trigger: fix_spec_file
+    description: "specファイルを修正して再度ツール呼び出し。load_specが成功するようになる"
+
+  # --- 参照系ツール（ストアなし） ---
+  - id: t6
+    from: spec_loaded_no_store
+    to: spec_loaded_no_store
+    trigger: read_tool_no_store
+    description: "sv_enumerate/sv_next/sv_prompt/sv_coverage/sv_batch_prompts/sv_export。load_storeがデフォルトdictを返し、全セルがunverifiedとして扱われる"
+
+  # --- 最初のrecord ---
+  - id: t7
+    from: spec_loaded_no_store
+    to: store_partial
+    trigger: first_valid_record
+    description: "sv_recordで有効なcell_keyとresponse_jsonを指定。save_storeがtempfile→renameでストアファイルを新規作成。cells数が1になる"
+
+  - id: t8
+    from: spec_loaded_no_store
+    to: spec_loaded_no_store
+    trigger: record_invalid_cell_no_store
+    description: "sv_recordで存在しないtransition_id/concern_idを指定。get_all_cellsで該当なし→エラーJSON。save_storeは呼ばれずストアは作成されない"
+
+  # --- store_empty（reset直後やrecord上書きで0件に戻らないため、save_store直後の最小状態） ---
+  - id: t9
+    from: store_partial
+    to: store_empty
+    trigger: reset_partial
+    description: "sv_resetでストアファイルをunlink。次のload_storeはデフォルトdictを返す。実質spec_loaded_no_storeと同等だが、reset応答の違い（status: resetとno_store）"
+
+  - id: t10
+    from: store_full
+    to: store_empty
+    trigger: reset_full
+    description: "全検証済み状態からsv_reset。ストアファイルをunlink"
+
+  # --- 追加record ---
+  - id: t11
+    from: store_partial
+    to: store_partial
+    trigger: additional_record
+    description: "sv_recordで未検証セルを記録。verified数が増えるがtotal未満のまま"
+
+  - id: t12
+    from: store_partial
+    to: store_full
+    trigger: final_record
+    description: "sv_recordで最後の未検証セルを記録。remaining=0になる"
+
+  - id: t13
+    from: store_partial
+    to: store_partial
+    trigger: record_overwrite
+    description: "既検証セルに再度sv_record。overwritten=trueが返り、verified数は変わらない"
+
+  - id: t14
+    from: store_partial
+    to: store_partial
+    trigger: record_invalid_json_body
+    description: "sv_recordで有効なcell_keyだがresponse_jsonが不正JSON。raw_textキーでラップして保存されwarningが返る"
+
+  - id: t15
+    from: store_partial
+    to: store_partial
+    trigger: record_invalid_cell_partial
+    description: "sv_recordで存在しないcell_keyを指定。エラーJSONが返りストアは変更されない"
+
+  # --- store_fullでの操作 ---
+  - id: t16
+    from: store_full
+    to: store_full
+    trigger: next_when_complete
+    description: "sv_nextが status=complete を返す。cell_key=null, remaining=0"
+
+  - id: t17
+    from: store_full
+    to: store_full
+    trigger: overwrite_in_full
+    description: "全検証済み状態でsv_record（上書き）。overwritten=trueで依然store_full"
+
+  - id: t18
+    from: store_full
+    to: store_full
+    trigger: read_tool_full
+    description: "sv_enumerate/sv_coverage/sv_export/sv_tlaplus等の参照系呼び出し。coverage_percent=100.0"
+
+  # --- store_partial参照系 ---
+  - id: t19
+    from: store_partial
+    to: store_partial
+    trigger: read_tool_partial
+    description: "検証途中での参照系ツール呼び出し。coverage<100%の状態を反映"
+
+  # --- store corruption ---
+  - id: t20
+    from: store_partial
+    to: store_corrupted
+    trigger: external_corruption
+    description: "外部プロセスがストアファイルを不正に書き換え。次のload_storeでjson.JSONDecodeError"
+
+  - id: t21
+    from: store_corrupted
+    to: store_corrupted
+    trigger: any_tool_corrupted
+    description: "_handle_errorsがJSONDecodeErrorをキャッチし「Store file corrupted: ... Consider running sv_reset.」を返す"
+
+  - id: t22
+    from: store_corrupted
+    to: store_empty
+    trigger: reset_corrupted
+    description: "sv_resetは load_store を呼ばずstore_pathを直接unlink。破損ファイルでもリセット可能"
+
+  # --- sv_next のフィルタリング ---
+  - id: t23
+    from: store_partial
+    to: store_partial
+    trigger: next_with_filter_match
+    description: "sv_nextにtransition_id/concern_idフィルタを指定し、該当する未検証セルがある場合。フィルタ後の先頭セルが返る"
+
+  - id: t24
+    from: store_partial
+    to: store_partial
+    trigger: next_with_filter_empty
+    description: "sv_nextにフィルタを指定したが該当する未検証セルがない場合。status=filtered_empty"
+
+  # --- sv_tlaplus のファイル出力 ---
+  - id: t25
+    from: store_partial
+    to: store_partial
+    trigger: tlaplus_with_output
+    description: "sv_tlaplusにoutput_pathを指定。cmd_tlaplusがファイルに書き込み、saved_toフィールドを返す"
+
+  - id: t26
+    from: spec_loaded_no_store
+    to: spec_loaded_no_store
+    trigger: tlaplus_no_store
+    description: "ストアなし状態でsv_tlaplus。data_integrityセルがないためinvariantsは空。基本的なTLA+構造のみ生成"
+
+  # --- render_promptのエッジケース ---
+  - id: t27
+    from: spec_loaded_no_store
+    to: spec_loaded_no_store
+    trigger: prompt_missing_template_var
+    description: "render_promptでテンプレートに未知の変数があるか、specにdomain_contextがない場合の挙動。domain_contextはget('', '')で空文字にフォールバック"
+
+  # --- 空のspec（transitionsやconcernsが空リスト） ---
+  - id: t28
+    from: no_store_no_spec
+    to: spec_loaded_no_store
+    trigger: load_empty_matrix_spec
+    description: "transitions=[]またはconcerns=[]のspec。load_specは成功するがget_all_cellsが空リストを返す。coverage_percentは0（ZeroDivisionError回避済み）"
+
+columns:
+  - id: boundary_behavior
+    prompt_template: |
+      以下のstate-verify実装の状態遷移について、境界値・エッジケースの挙動を検証してください。
+      実装コードの実際の分岐を追って回答してください。
+
+      遷移: {from} → {to}
+      トリガー: {trigger}
+      説明: {transition_description}
+
+      コンテキスト:
+      {domain_context}
+
+      検証観点:
+      - 0件のcells（transitions=[]やconcerns=[]）での挙動
+      - verified == total の境界（最後の1セルを記録する瞬間）
+      - cell_keyの区切り文字 ":" がtransition_idやconcern_idに含まれる場合の衝突
+      - store.cellsキーが存在しない場合（store.get("cells", 空dict)で防御されているか全箇所で一貫しているか）
+      - store["metadata"]キーが存在しない場合のsave_storeの挙動（KeyError?）
+      - yaml.safe_loadがdictでなくリストや文字列を返す場合
+
+      以下のJSON形式で回答:
+      {{
+        "boundary_cases": [
+          {{"case": "ケース", "code_path": "関連するコード箇所", "actual_behavior": "実際の挙動", "is_safe": true}}
+        ],
+        "potential_crashes": ["クラッシュしうるケース"],
+        "defensive_coding_gaps": ["防御的コーディングが不足している箇所"]
+      }}
+
+  - id: error_propagation
+    prompt_template: |
+      以下のstate-verify実装の状態遷移について、エラーの伝播経路を検証してください。
+      state_verify.pyの関数からmcp_server.pyの_handle_errorsまでの例外フローを追跡してください。
+
+      遷移: {from} → {to}
+      トリガー: {trigger}
+      説明: {transition_description}
+
+      コンテキスト:
+      {domain_context}
+
+      検証観点:
+      - _handle_errorsがキャッチする例外型: ValueError, FileNotFoundError, YAMLError, JSONDecodeError, Exception
+      - キャッチされない例外型はあるか（例: OSError, PermissionError, KeyboardInterrupt）
+      - KeyboardInterruptやSystemExitは_handle_errorsのExceptをすり抜けるか（BaseExceptionだから）
+      - save_storeのexceptブロックがBaseExceptionをキャッチ→tmp_pathを削除→re-raise。この後_handle_errorsで再キャッチされるか
+      - load_specがNoneチェック後にspec["transitions"]アクセスでTypeErrorになりうるか（specがdictでない場合）
+      - sv_tlaplusのFakeArgs+redirect_stdout経由でのエラー伝播
+
+      以下のJSON形式で回答:
+      {{
+        "error_paths": [
+          {{"origin": "例外発生箇所", "exception_type": "例外型", "caught_by": "キャッチ箇所", "response": "最終レスポンス"}}
+        ],
+        "uncaught_exceptions": ["キャッチされない例外パス"],
+        "error_message_quality": "エラーメッセージの具体性と対処可能性の評価"
+      }}
+
+  - id: file_io_safety
+    prompt_template: |
+      以下のstate-verify実装の状態遷移について、ファイルI/O操作の安全性を検証してください。
+
+      遷移: {from} → {to}
+      トリガー: {trigger}
+      説明: {transition_description}
+
+      コンテキスト:
+      {domain_context}
+
+      検証観点:
+      - save_storeのatomic write: tempfile.mkstemp → fdopen → flock(LOCK_EX) → json.dump → flush → fsync → rename
+        - ロックはtmpファイルに対して取得されている（最終ファイルではない）。これは正しいか？
+        - os.rename()はPOSIXではatomicだがクロスデバイスでは失敗する
+        - tmpファイルが同一ディレクトリに作られるのでクロスデバイス問題は回避されているか
+      - load_storeのflock(LOCK_SH): 共有ロックで読み取り。ただしsave_storeのロック対象はtmpファイルなのでload_storeのロックとは排他関係にならない
+      - sv_resetのunlink: ロックなしの直接削除。同時にsave_storeが動いている場合のrace
+      - specファイルの読み込み(load_spec): ロックなし。specが書き換え中に読まれた場合の挙動
+      - tempfileのクリーンアップ: save_storeのexceptブロックでtmp_pathを削除。正常パスではrename済みなので問題ないが、renameとexceptの間で例外が発生する可能性
+
+      以下のJSON形式で回答:
+      {{
+        "io_operations": [
+          {{"operation": "操作", "file": "対象ファイル", "lock_type": "ロック種別", "atomic": true, "safe": true, "issue": "問題点"}}
+        ],
+        "lock_effectiveness": "ロック戦略の実効性評価（load_storeとsave_storeのロック対象がずれている点を含む）",
+        "crash_scenarios": [
+          {{"timing": "クラッシュタイミング", "data_loss_risk": "high|medium|low|none", "recovery": "復旧方法"}}
+        ]
+      }}
+
+  - id: api_contract
+    prompt_template: |
+      以下のstate-verify実装の状態遷移について、ツールの出力がdocstringの契約を満たすか検証してください。
+      mcp_server.pyの各ツール関数のdocstringと実際のreturn文を照合してください。
+
+      遷移: {from} → {to}
+      トリガー: {trigger}
+      説明: {transition_description}
+
+      コンテキスト:
+      {domain_context}
+
+      検証観点:
+      - sv_next: docstringは"cell key, transition info, concern type, prompt, remaining count"を約束。実際の出力JSON構造は一致するか
+      - sv_enumerate: "matrix data: name, dimensions, coverage, grid"。実際にgrid構造が正しいか
+      - sv_record: "recorded"ステータスの出力にoverwrittenフラグが常に含まれるか
+      - sv_coverage: "unverified cells grouped by transition, per-concern coverage"。空の場合のキー有無
+      - sv_export: CLI版(cmd_export)とMCP版(sv_export)で出力構造が微妙に異なる点（descriptionフィールドの有無等）
+      - statusフィールドの値域: "ok", "pending", "complete", "filtered_empty", "recorded", "reset", "no_store", "error"。一貫性はあるか
+      - エラー時の出力にstatusとerrorキーが常に存在するか
+
+      以下のJSON形式で回答:
+      {{
+        "contract_checks": [
+          {{"tool": "ツール名", "promised": "docstringの約束", "actual": "実際の出力", "matches": true}}
+        ],
+        "status_values_used": ["このtransitionで使われるstatus値"],
+        "cli_mcp_divergence": ["CLI版とMCP版で異なる出力構造"]
+      }}
+
+  - id: internal_consistency
+    prompt_template: |
+      以下のstate-verify実装の状態遷移について、内部データ構造の一貫性を検証してください。
+
+      遷移: {from} → {to}
+      トリガー: {trigger}
+      説明: {transition_description}
+
+      コンテキスト:
+      {domain_context}
+
+      検証観点:
+      - store辞書の構造: cells辞書（key→記録データ）とmetadata辞書（created_at, updated_at）
+        - load_storeが返すデフォルトdictにはmetadata.created_atがあるが、save_storeはmetadata.updated_atのみ追加
+        - 初回save_storeでmetadataにcreated_atとupdated_atの両方が保存されるか
+      - cell_keyの一意性: "transition_id:concern_id"形式。IDに":"を含むspec定義があった場合に衝突する
+      - get_all_cellsの順序: transitionsの順序 x concernsの順序。sv_nextは先頭を返すので順序が重要
+      - sv_enumerate内のverified計算: cellsリストとverified_keysの交差で数えるのとlen(store.cells)が異なりうるか
+        - storeにspec外のキーが残っている場合（spec変更後にstoreをリセットしていない場合）
+      - sv_recordのverified計算: len(store.cells)を使用。spec外のキーもカウントされてしまう
+      - sv_coverageのverified計算: len(verified_keys)を使用。spec外キーもカウント
+
+      以下のJSON形式で回答:
+      {{
+        "consistency_checks": [
+          {{"aspect": "チェック観点", "consistent": true, "detail": "詳細説明"}}
+        ],
+        "stale_data_scenarios": ["storeとspecの不一致が起きるシナリオ"],
+        "count_discrepancies": ["カウント方法が異なるために不整合が起きうる箇所"]
+      }}
