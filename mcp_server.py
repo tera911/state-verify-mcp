@@ -472,24 +472,31 @@ def sv_tests(
     row_id: str | None = None,
     framework: str = "pytest",
 ) -> str:
-    """Generate test code prompts from verified analysis results.
+    """Generate test code from verified analysis results.
 
-    Reads all verified cells and produces structured prompts for
-    generating test code that validates the implementation matches
-    the verified spec. Use this to bridge spec-level verification
-    with actual code testing.
+    Frameworks:
+    - pytest: Standard unit/integration tests
+    - jest, rspec, go_test: Other language frameworks
+    - hypothesis-stateful: Hypothesis RuleBasedStateMachine (stateful PBT)
+    - mutmut: Mutation testing config for verifying property strength
 
     Args:
         spec_path: Path to YAML spec file (optional)
         row_id: Generate tests for a specific row only (optional)
-        framework: Test framework (pytest, jest, rspec, go_test)
+        framework: Test framework (pytest, jest, rspec, go_test, hypothesis-stateful, mutmut)
     """
     path = _resolve_spec(spec_path)
     spec = load_spec(path)
     store = load_store(path)
     cells = get_all_cells(spec)
-
     stored = store.get("cells", {})
+
+    if framework == "hypothesis-stateful":
+        return _build_stateful_pbt(spec, stored)
+
+    if framework == "mutmut":
+        return _build_mutmut_config(spec, stored)
+
     rows = spec["rows"]
     columns = spec["columns"]
 
@@ -500,7 +507,6 @@ def sv_tests(
 
     test_plans = []
     for r in rows:
-        # Collect all verified columns for this row
         verified_cols = {}
         for c in columns:
             key = cell_key(r["id"], c["id"])
@@ -533,7 +539,6 @@ def _build_test_prompt(row: dict, verified_cols: dict, spec: dict, framework: st
     col_summaries = []
     for col_id, response in verified_cols.items():
         resp_str = json.dumps(response, ensure_ascii=False, indent=2) if isinstance(response, dict) else str(response)
-        # Truncate long responses
         if len(resp_str) > 500:
             resp_str = resp_str[:500] + "\n  ... (truncated)"
         col_summaries.append(f"### {col_id}\n{resp_str}")
@@ -557,6 +562,244 @@ def _build_test_prompt(row: dict, verified_cols: dict, spec: dict, framework: st
 4. モック — 外部依存（API、DB等）のモック設定
 
 テストコードのみを出力してください（説明不要）。"""
+
+
+def _build_stateful_pbt(spec: dict, stored: dict) -> str:
+    """Build a Hypothesis RuleBasedStateMachine from verified spec."""
+
+    # Extract states
+    states = spec.get("states", {})
+    if isinstance(states, dict):
+        state_names = list(states.keys())
+    elif isinstance(states, list):
+        state_names = states
+    else:
+        state_names = []
+
+    # Extract transitions (non-path rows with from/to)
+    transitions = [r for r in spec["rows"] if "from" in r and "to" in r and r.get("is_path") != "true"]
+
+    # Extract invariants from verified cells
+    invariants = []
+    for r in spec["rows"]:
+        for col in spec["columns"]:
+            key = cell_key(r["id"], col["id"])
+            if key in stored:
+                resp = stored[key].get("response", {})
+                if isinstance(resp, dict):
+                    # data_integrity invariants
+                    for inv in resp.get("invariants", []):
+                        invariants.append({
+                            "source": f"{r['id']}:{col['id']}",
+                            "condition": inv.get("condition", ""),
+                            "check": inv.get("check_query", ""),
+                        })
+
+    # Extract preconditions from verified cells
+    preconditions = {}
+    for t in transitions:
+        key = cell_key(t["id"], "preconditions")
+        if key in stored:
+            resp = stored[key].get("response", {})
+            if isinstance(resp, dict):
+                preconditions[t["id"]] = {
+                    "guards": resp.get("guard_checks", resp.get("preconditions", [])),
+                }
+
+    # Extract concurrency info
+    race_conditions = []
+    for t in transitions:
+        key = cell_key(t["id"], "concurrency")
+        if key in stored:
+            resp = stored[key].get("response", {})
+            if isinstance(resp, dict):
+                for rc in resp.get("race_conditions", []):
+                    race_conditions.append({
+                        "transition": t["id"],
+                        "scenario": rc.get("scenario", ""),
+                        "mitigation": rc.get("mitigation", ""),
+                    })
+
+    # Build rules for the state machine
+    rules = []
+    for t in transitions:
+        trigger = t.get("trigger", t["id"])
+        pre = preconditions.get(t["id"], {})
+        guards = pre.get("guards", [])
+        guards_comment = "\n".join(f"        # - {g}" for g in guards[:5]) if guards else "        # (no guards extracted)"
+
+        rules.append({
+            "id": t["id"],
+            "method_name": trigger,
+            "from_state": t["from"],
+            "to_state": t["to"],
+            "description": t.get("description", ""),
+            "guards_comment": guards_comment,
+        })
+
+    # Build the code
+    code_lines = [
+        '"""',
+        f'Stateful PBT: {spec["name"]}',
+        f'Auto-generated from state-verify spec.',
+        f'States: {len(state_names)}, Transitions: {len(transitions)}, Invariants: {len(invariants)}',
+        '"""',
+        'from hypothesis import assume, note, settings',
+        'from hypothesis.stateful import RuleBasedStateMachine, rule, invariant, initialize',
+        'import hypothesis.strategies as st',
+        '',
+        '',
+        f'class {spec["name"].replace(" ", "")}StateMachine(RuleBasedStateMachine):',
+        f'    """Stateful property-based test for {spec["name"]}."""',
+        '',
+        f'    STATES = {state_names!r}',
+        '',
+        '    def __init__(self):',
+        '        super().__init__()',
+        '        self.state = None',
+        '        # TODO: Initialize your system under test here',
+        '        # self.sut = YourSystem()',
+        '',
+    ]
+
+    # Initialize rule
+    if state_names:
+        code_lines.extend([
+            '    @initialize()',
+            '    def init(self):',
+            f'        self.state = "{state_names[0]}"',
+            '        # TODO: Reset system to initial state',
+            '        # self.sut.reset()',
+            '',
+        ])
+
+    # Transition rules
+    for r in rules:
+        code_lines.extend([
+            f'    @rule()',
+            f'    def {r["method_name"]}(self):',
+            f'        """[{r["id"]}] {r["description"]}"""',
+            f'        assume(self.state == "{r["from_state"]}")',
+            f'        # Guards from verified preconditions:',
+            r["guards_comment"],
+            f'        # TODO: Execute the transition on your SUT',
+            f'        # self.sut.{r["method_name"]}()',
+            f'        self.state = "{r["to_state"]}"',
+            f'        note(f"{{self.state}}: {r["method_name"]}")',
+            '',
+        ])
+
+    # Invariants
+    if invariants:
+        code_lines.extend([
+            '    # --- Invariants (from verified data_integrity cells) ---',
+            '',
+        ])
+        for i, inv in enumerate(invariants[:20]):  # Limit to 20
+            safe_name = f'check_invariant_{i}'
+            code_lines.extend([
+                f'    @invariant()',
+                f'    def {safe_name}(self):',
+                f'        """[{inv["source"]}] {inv["condition"][:80]}"""',
+                f'        # TODO: Implement assertion',
+                f'        # {inv["condition"]}',
+                f'        pass',
+                '',
+            ])
+
+    # State-specific invariants
+    code_lines.extend([
+        '    @invariant()',
+        '    def state_is_valid(self):',
+        '        """State must always be in the defined set."""',
+        '        if self.state is not None:',
+        '            assert self.state in self.STATES, f"Invalid state: {self.state}"',
+        '',
+    ])
+
+    # Test runner
+    code_lines.extend([
+        '',
+        f'# Run: {spec["name"].replace(" ", "")}StateMachine.TestCase.settings = settings(max_examples=200, stateful_step_count=20)',
+        f'TestStateMachine = {spec["name"].replace(" ", "")}StateMachine.TestCase',
+    ])
+
+    # Race condition notes
+    race_notes = []
+    for rc in race_conditions[:10]:
+        race_notes.append(f"# [{rc['transition']}] {rc['scenario'][:80]}")
+
+    code = "\n".join(code_lines)
+
+    return json.dumps({
+        "status": "ok",
+        "framework": "hypothesis-stateful",
+        "description": (
+            "Hypothesis RuleBasedStateMachine auto-generated from state-verify spec. "
+            "Fill in the TODO sections with your actual system-under-test implementation. "
+            "The state machine randomly combines transitions and checks invariants at every step."
+        ),
+        "states": state_names,
+        "transitions": len(transitions),
+        "invariants": len(invariants),
+        "race_conditions_to_test": race_notes,
+        "code": code,
+        "usage": [
+            "pip install hypothesis",
+            "Fill in TODO sections with your SUT (system under test)",
+            "pytest test_stateful.py -v",
+            "Hypothesis will generate random transition sequences and check invariants",
+        ],
+    }, ensure_ascii=False)
+
+
+def _build_mutmut_config(spec: dict, stored: dict) -> str:
+    """Build mutation testing guidance from verified spec."""
+
+    # Collect all properties that should detect mutations
+    properties = []
+    for r in spec["rows"]:
+        for col in spec["columns"]:
+            key = cell_key(r["id"], col["id"])
+            if key in stored:
+                resp = stored[key].get("response", {})
+                if isinstance(resp, dict):
+                    for inv in resp.get("invariants", []):
+                        properties.append({
+                            "source": f"{r['id']}:{col['id']}",
+                            "condition": inv.get("condition", ""),
+                        })
+                    for guard in resp.get("guard_checks", []):
+                        properties.append({
+                            "source": f"{r['id']}:{col['id']}",
+                            "condition": guard if isinstance(guard, str) else str(guard),
+                        })
+
+    return json.dumps({
+        "status": "ok",
+        "framework": "mutmut",
+        "description": (
+            "Mutation testing verifies that your properties are strong enough. "
+            "If a mutation survives (code is changed but tests still pass), "
+            "the property is too weak — go back to state-verify and deepen the analysis."
+        ),
+        "properties_to_protect": len(properties),
+        "setup": [
+            "pip install mutmut",
+            "mutmut run --paths-to-mutate=src/",
+            "mutmut results",
+            "mutmut html  # Visual report",
+        ],
+        "workflow": [
+            "1. sv_tests --framework pytest で通常テストを生成",
+            "2. sv_tests --framework hypothesis-stateful でPBTを生成",
+            "3. mutmut run でmutation testを実行",
+            "4. 生き残ったmutant = プロパティが弱い箇所",
+            "5. state-verify の該当セルに戻って分析を深める",
+            "6. テストを強化して再度 mutmut run",
+        ],
+        "key_properties": properties[:30],
+    }, ensure_ascii=False)
 
 
 @mcp.tool()
