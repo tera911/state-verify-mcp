@@ -1,6 +1,9 @@
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
 .*.verified.json
 .*.lock
 *.tmp
+examples/*.tla
+examples/*-report.json
