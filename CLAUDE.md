@@ -121,6 +121,16 @@ pathsセクションで遷移の順序を定義すると:
 | データマイグレーション | テーブル×カラム変更 | エッジケース(null/invalid/fk/rollback) | data-migration.yaml |
 | 通知ルーティング | イベント×チャネル | ユーザー設定(opt_out/quiet_hours/frequency/locale) | notification-routing.yaml |
 
+## git ルール
+
+**テスト未実施のpushは禁止。** コード変更後は以下を必ず実行:
+
+```bash
+.venv/bin/python3 tests/mcp_e2e_test.py  # 20/20 全パス確認
+```
+
+テスト全パスを確認してからcommit → push。例外なし。
+
 ## 注意事項
 
 - verified.json は `.{spec名}.verified.json` として保存
