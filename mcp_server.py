@@ -475,15 +475,14 @@ def sv_tests(
     """Generate test code from verified analysis results.
 
     Frameworks:
-    - pytest: Standard unit/integration tests
-    - jest, rspec, go_test: Other language frameworks
-    - hypothesis-stateful: Hypothesis RuleBasedStateMachine (stateful PBT)
-    - mutmut: Mutation testing config for verifying property strength
+    - pytest, jest, rspec, go_test: Unit/integration test prompts
+    - stateful-pbt: Language-agnostic stateful PBT spec (state machine + invariants + conversion prompt)
+    - mutmut: Mutation testing workflow for verifying property strength
 
     Args:
         spec_path: Path to YAML spec file (optional)
         row_id: Generate tests for a specific row only (optional)
-        framework: Test framework (pytest, jest, rspec, go_test, hypothesis-stateful, mutmut)
+        framework: Test framework (pytest, jest, rspec, go_test, stateful-pbt, mutmut)
     """
     path = _resolve_spec(spec_path)
     spec = load_spec(path)
@@ -491,7 +490,7 @@ def sv_tests(
     cells = get_all_cells(spec)
     stored = store.get("cells", {})
 
-    if framework == "hypothesis-stateful":
+    if framework == "stateful-pbt":
         return _build_stateful_pbt(spec, stored)
 
     if framework == "mutmut":
@@ -565,9 +564,8 @@ def _build_test_prompt(row: dict, verified_cols: dict, spec: dict, framework: st
 
 
 def _build_stateful_pbt(spec: dict, stored: dict) -> str:
-    """Build a Hypothesis RuleBasedStateMachine from verified spec."""
+    """Build a language-agnostic stateful PBT spec from verified cells."""
 
-    # Extract states
     states = spec.get("states", {})
     if isinstance(states, dict):
         state_names = list(states.keys())
@@ -576,10 +574,9 @@ def _build_stateful_pbt(spec: dict, stored: dict) -> str:
     else:
         state_names = []
 
-    # Extract transitions (non-path rows with from/to)
     transitions = [r for r in spec["rows"] if "from" in r and "to" in r and r.get("is_path") != "true"]
 
-    # Extract invariants from verified cells
+    # Extract invariants, preconditions, race conditions from verified cells
     invariants = []
     for r in spec["rows"]:
         for col in spec["columns"]:
@@ -587,7 +584,6 @@ def _build_stateful_pbt(spec: dict, stored: dict) -> str:
             if key in stored:
                 resp = stored[key].get("response", {})
                 if isinstance(resp, dict):
-                    # data_integrity invariants
                     for inv in resp.get("invariants", []):
                         invariants.append({
                             "source": f"{r['id']}:{col['id']}",
@@ -595,18 +591,32 @@ def _build_stateful_pbt(spec: dict, stored: dict) -> str:
                             "check": inv.get("check_query", ""),
                         })
 
-    # Extract preconditions from verified cells
-    preconditions = {}
+    rules = []
     for t in transitions:
+        guards = []
         key = cell_key(t["id"], "preconditions")
         if key in stored:
             resp = stored[key].get("response", {})
             if isinstance(resp, dict):
-                preconditions[t["id"]] = {
-                    "guards": resp.get("guard_checks", resp.get("preconditions", [])),
-                }
+                guards = resp.get("guard_checks", resp.get("preconditions", []))
 
-    # Extract concurrency info
+        side_effects = []
+        key = cell_key(t["id"], "side_effects")
+        if key in stored:
+            resp = stored[key].get("response", {})
+            if isinstance(resp, dict):
+                side_effects = resp.get("side_effects", [])
+
+        rules.append({
+            "id": t["id"],
+            "name": t.get("trigger", t["id"]),
+            "from": t["from"],
+            "to": t["to"],
+            "description": t.get("description", ""),
+            "guards": guards[:5],
+            "side_effects": [s.get("action", "") for s in side_effects[:5]] if isinstance(side_effects, list) else [],
+        })
+
     race_conditions = []
     for t in transitions:
         key = cell_key(t["id"], "concurrency")
@@ -620,136 +630,58 @@ def _build_stateful_pbt(spec: dict, stored: dict) -> str:
                         "mitigation": rc.get("mitigation", ""),
                     })
 
-    # Build rules for the state machine
-    rules = []
-    for t in transitions:
-        trigger = t.get("trigger", t["id"])
-        pre = preconditions.get(t["id"], {})
-        guards = pre.get("guards", [])
-        guards_comment = "\n".join(f"        # - {g}" for g in guards[:5]) if guards else "        # (no guards extracted)"
+    # Build conversion prompt
+    prompt = f"""以下のstateful PBT仕様をあなたのプロジェクトの言語・フレームワークに合わせて実装してください。
 
-        rules.append({
-            "id": t["id"],
-            "method_name": trigger,
-            "from_state": t["from"],
-            "to_state": t["to"],
-            "description": t.get("description", ""),
-            "guards_comment": guards_comment,
-        })
+## 状態マシン仕様: {spec['name']}
 
-    # Build the code
-    code_lines = [
-        '"""',
-        f'Stateful PBT: {spec["name"]}',
-        f'Auto-generated from state-verify spec.',
-        f'States: {len(state_names)}, Transitions: {len(transitions)}, Invariants: {len(invariants)}',
-        '"""',
-        'from hypothesis import assume, note, settings',
-        'from hypothesis.stateful import RuleBasedStateMachine, rule, invariant, initialize',
-        'import hypothesis.strategies as st',
-        '',
-        '',
-        f'class {spec["name"].replace(" ", "")}StateMachine(RuleBasedStateMachine):',
-        f'    """Stateful property-based test for {spec["name"]}."""',
-        '',
-        f'    STATES = {state_names!r}',
-        '',
-        '    def __init__(self):',
-        '        super().__init__()',
-        '        self.state = None',
-        '        # TODO: Initialize your system under test here',
-        '        # self.sut = YourSystem()',
-        '',
-    ]
+### States ({len(state_names)}個)
+{json.dumps(state_names, ensure_ascii=False)}
 
-    # Initialize rule
-    if state_names:
-        code_lines.extend([
-            '    @initialize()',
-            '    def init(self):',
-            f'        self.state = "{state_names[0]}"',
-            '        # TODO: Reset system to initial state',
-            '        # self.sut.reset()',
-            '',
-        ])
+初期状態: {state_names[0] if state_names else 'N/A'}
 
-    # Transition rules
-    for r in rules:
-        code_lines.extend([
-            f'    @rule()',
-            f'    def {r["method_name"]}(self):',
-            f'        """[{r["id"]}] {r["description"]}"""',
-            f'        assume(self.state == "{r["from_state"]}")',
-            f'        # Guards from verified preconditions:',
-            r["guards_comment"],
-            f'        # TODO: Execute the transition on your SUT',
-            f'        # self.sut.{r["method_name"]}()',
-            f'        self.state = "{r["to_state"]}"',
-            f'        note(f"{{self.state}}: {r["method_name"]}")',
-            '',
-        ])
+### Rules ({len(rules)}個)
+各ruleは状態遷移を表します。テストフレームワークのstateful testing機能で実装してください。
+- Python: hypothesis.stateful.RuleBasedStateMachine
+- TypeScript: fast-check fc.modelRun / fc.commands
+- Go: rapid.StateMachine
+- Rust: proptest
+- その他: ランダムな操作列を生成して各ステップ後にinvariantをチェック
 
-    # Invariants
-    if invariants:
-        code_lines.extend([
-            '    # --- Invariants (from verified data_integrity cells) ---',
-            '',
-        ])
-        for i, inv in enumerate(invariants[:20]):  # Limit to 20
-            safe_name = f'check_invariant_{i}'
-            code_lines.extend([
-                f'    @invariant()',
-                f'    def {safe_name}(self):',
-                f'        """[{inv["source"]}] {inv["condition"][:80]}"""',
-                f'        # TODO: Implement assertion',
-                f'        # {inv["condition"]}',
-                f'        pass',
-                '',
-            ])
+### Invariants ({len(invariants)}個)
+**全ruleの実行後に毎回チェックすべき不変条件。** 1つでも破れたらテスト失敗。
 
-    # State-specific invariants
-    code_lines.extend([
-        '    @invariant()',
-        '    def state_is_valid(self):',
-        '        """State must always be in the defined set."""',
-        '        if self.state is not None:',
-        '            assert self.state in self.STATES, f"Invalid state: {self.state}"',
-        '',
-    ])
+### Race Conditions ({len(race_conditions)}個)
+並行実行時に注意すべき競合シナリオ。stateful testで再現を試みる。
 
-    # Test runner
-    code_lines.extend([
-        '',
-        f'# Run: {spec["name"].replace(" ", "")}StateMachine.TestCase.settings = settings(max_examples=200, stateful_step_count=20)',
-        f'TestStateMachine = {spec["name"].replace(" ", "")}StateMachine.TestCase',
-    ])
+## 実装の指示
+1. 各ruleのfrom状態をpreconditionとして設定（その状態でなければスキップ）
+2. ruleの実行後にto状態に遷移
+3. 全invariantを毎ステップ後に検証
+4. テストフレームワークにランダムなrule列を生成させる（最低20ステップ×50例）
+5. guards/side_effectsはrule内でSUT（テスト対象システム）に対して実行
 
-    # Race condition notes
-    race_notes = []
-    for rc in race_conditions[:10]:
-        race_notes.append(f"# [{rc['transition']}] {rc['scenario'][:80]}")
-
-    code = "\n".join(code_lines)
+テストコードのみを出力してください。"""
 
     return json.dumps({
         "status": "ok",
-        "framework": "hypothesis-stateful",
-        "description": (
-            "Hypothesis RuleBasedStateMachine auto-generated from state-verify spec. "
-            "Fill in the TODO sections with your actual system-under-test implementation. "
-            "The state machine randomly combines transitions and checks invariants at every step."
-        ),
-        "states": state_names,
-        "transitions": len(transitions),
-        "invariants": len(invariants),
-        "race_conditions_to_test": race_notes,
-        "code": code,
-        "usage": [
-            "pip install hypothesis",
-            "Fill in TODO sections with your SUT (system under test)",
-            "pytest test_stateful.py -v",
-            "Hypothesis will generate random transition sequences and check invariants",
-        ],
+        "framework": "stateful-pbt",
+        "state_machine": {
+            "name": spec["name"],
+            "initial_state": state_names[0] if state_names else None,
+            "states": state_names,
+            "rules": rules,
+            "invariants": invariants[:20],
+            "race_conditions": race_conditions[:10],
+        },
+        "conversion_prompt": prompt,
+        "known_frameworks": {
+            "python": "hypothesis RuleBasedStateMachine",
+            "typescript": "fast-check fc.modelRun / fc.commands",
+            "go": "rapid StateMachine",
+            "rust": "proptest",
+            "ruby": "Rantly + custom state machine",
+        },
     }, ensure_ascii=False)
 
 
@@ -845,7 +777,7 @@ def sv_guide() -> str:
                 "sv_coverage": "カバレッジレポート",
                 "sv_batch_prompts": "全未検証promptを一括取得",
                 "sv_export": "全結果をJSONレポートとして出力",
-                "sv_tests": "検証結果からテストコード生成用promptを出力（pytest/jest/rspec/go_test）",
+                "sv_tests": "検証結果からテスト生成（pytest/jest等のprompt, stateful-pbtの構造化データ, mutmutのワークフロー）",
                 "sv_tlaplus": "TLA+仕様を自動生成",
                 "sv_reset": "検証データ全消去（取り消し不可）",
             },

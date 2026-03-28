@@ -27,8 +27,8 @@ requests = [
     {"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"sv_export","arguments":{}}},
     # 10. sv_tests (pytest)
     {"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"sv_tests","arguments":{"row_id":"t1"}}},
-    # 11. sv_tests (hypothesis-stateful)
-    {"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"sv_tests","arguments":{"framework":"hypothesis-stateful"}}},
+    # 11. sv_tests (stateful-pbt)
+    {"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"sv_tests","arguments":{"framework":"stateful-pbt"}}},
     # 12. sv_tests (mutmut)
     {"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"sv_tests","arguments":{"framework":"mutmut"}}},
     # 13. sv_tlaplus
@@ -63,7 +63,7 @@ TOOL_NAMES = {
     14: "sv_reset",
     15: "err:invalid_cell", 16: "err:bad_spec", 17: "err:bad_json",
     18: "sv_next(post_reset)", 19: "sv_reset(no_store)",
-    20: "sv_tests(hypothesis)", 21: "sv_tests(mutmut)",
+    20: "sv_tests(stateful-pbt)", 21: "sv_tests(mutmut)",
 }
 
 passed = 0
@@ -112,7 +112,8 @@ for line in proc.stdout.strip().split("\n"):
     if rid == 13:
         extra = f" saved_to={data.get('saved_to','none')} tla_len={len(data.get('tla_spec',''))}"
     if rid == 20:
-        extra = f" states={len(data.get('states',[]))} transitions={data.get('transitions',0)} code_len={len(data.get('code',''))}"
+        sm = data.get('state_machine', {})
+        extra = f" states={len(sm.get('states',[]))} rules={len(sm.get('rules',[]))} invariants={len(sm.get('invariants',[]))}"
     if rid == 21:
         extra = f" properties={data.get('properties_to_protect',0)}"
     print(f"  {mark} {name:25s} status={status:15s} (expected={exp}){extra}")
