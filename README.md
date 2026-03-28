@@ -19,7 +19,7 @@ LLMに「全状態遷移×全関心事を検討して」と依頼すると、必
 4. LLMは1セルずつ分析 → `{verified_context}` で前セルの回答を自動参照
 5. カバレッジレポートで漏れを可視化
 6. TLA+ 仕様を自動生成（遷移経路のtemporal property含む）
-7. 検証結果からテストコード生成用promptを出力
+7. 検証結果からテスト生成（stateful PBT / 単体テスト / mutation testing）
 
 ## セットアップ
 
@@ -54,7 +54,7 @@ claude mcp add state-verify -s project -- \
 | `sv_coverage` | カバレッジレポート |
 | `sv_batch_prompts` | 全未検証promptを一括取得 |
 | `sv_export` | 全結果をJSONレポートとして出力 |
-| `sv_tests` | 検証結果からテストコード生成用prompt |
+| `sv_tests` | テスト生成（pytest/stateful-pbt/mutmut） |
 | `sv_tlaplus` | TLA+仕様を自動生成 |
 | `sv_reset` | 検証データ全消去 |
 
@@ -116,16 +116,41 @@ states:
 - `{verified_context}` — 同一rowの検証済みセル回答が自動注入（columns定義順で依存解決）
 - `{row_id}`, `{column_id}`, `{key}` — セル識別子
 
-### セル間依存の解決
+### セル間依存
 
-columnsの定義順がそのまま検証順序。`{verified_context}` をprompt_templateに含めると、同じrowの前のcolumnで検証済みの回答が自動的にコンテキストとして注入される。
+columnsの定義順 = 検証順序。`{verified_context}` で同じrowの前column回答を自動参照。
 
 ### paths（遷移経路の検証）
 
-pathsセクションで遷移の順序を定義すると:
 1. 各pathが新しいrowとして自動展開
-2. TLA+生成時に `~>` (leads-to) temporal propertyが自動生成
-3. 「この経路全体でこの関心事はどうか」をマトリクスで検証可能
+2. TLA+に `~>` (leads-to) temporal propertyを自動生成
+3. 「この経路全体でこの関心事はどうか」を検証可能
+
+## テスト生成
+
+sv_testsの3モード:
+
+| framework | 出力 | 用途 |
+|-----------|------|------|
+| `pytest`等 | LLMへのテスト生成prompt | 言語問わず単体/結合テスト |
+| `stateful-pbt` | 状態マシン構造化JSON + 変換prompt | ランダムパスで不変条件を検証 |
+| `mutmut` | プロパティ一覧 + ワークフロー | テスト自体の強度を検証 |
+
+`stateful-pbt` は言語非依存の構造化データを出力。LLMが任意の言語に変換:
+
+```
+sv_tests → state_machine JSON → LLMが変換 → Hypothesis / fast-check / rapid / proptest
+```
+
+検証パイプライン全体:
+
+```
+state-verify  → 何を検証すべきか（列挙の網羅性）
+sv_tests      → テストコード生成（仕様→実装の橋渡し）
+stateful-pbt  → ランダムパスで不変条件検証（順序依存の問題発見）
+mutmut        → テスト自体の強度検証（プロパティが弱くないか）
+TLA+          → 形式的モデル検証（全パスの安全性）
+```
 
 ## ユースケース
 
@@ -139,16 +164,16 @@ pathsセクションで遷移の順序を定義すると:
 | 通知ルーティング | イベント×チャネル | ユーザー設定 | notification-routing.yaml |
 | コード実装検証 | コードの状態×操作 | 検証観点 | code-behavior.yaml |
 
-## TLA+ との連携
+## TLA+
 
 ```bash
 python3 state_verify.py -s examples/order-states.yaml tlaplus -o OrderManagement.tla
-tlc OrderManagement.tla  # TLC で検証
+tlc OrderManagement.tla
 ```
 
-- **TypeInvariant**: state が定義済みの状態集合に含まれるか
-- **Reachability**: 全ての状態に到達可能か
-- **Path properties**: pathsから自動生成された `~>` temporal property
+- **TypeInvariant**: state が定義済み集合に含まれるか
+- **Reachability**: 全状態に到達可能か
+- **Path properties**: pathsから `~>` temporal property自動生成
 - **Safety invariants**: 検証済みセルの `invariants` キーから自動抽出
 
 ## アーキテクチャ
@@ -160,13 +185,13 @@ Parser (コードが列挙)
     ↓
 Verification Matrix (N rows × M columns)
     ↓
-LLM が1セルずつ focused に回答
-（{verified_context} で前セルの回答を自動参照）
+LLM が1セルずつ focused に回答（{verified_context} で前セル参照）
     ↓
-Coverage Report + TLA+ 仕様 + テストコード生成
+Coverage Report + TLA+ 仕様 + テスト生成（stateful-pbt / pytest / mutmut）
 ```
 
 列挙と網羅性保証 → コード（決定的）
 個別の判断・推論 → LLM（得意なことだけ）
 不変条件の検証 → TLA+ モデルチェッカー（形式的）
-仕様と実装の橋渡し → sv_tests（テストコード生成）
+仕様と実装の橋渡し → sv_tests（言語非依存テスト生成）
+テスト品質の検証 → mutation testing（テストのテスト）

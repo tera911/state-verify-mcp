@@ -12,13 +12,16 @@ YAML DSL (人間が定義) → Parser (コードが列挙) → Verification Matr
                                               （{verified_context} で前セルの回答を自動参照）
                                                         ↓
                                               Coverage Report + TLA+ 仕様生成
+                                                        ↓
+                                              テスト生成（stateful-pbt / pytest / mutmut）
 ```
 
 ## ファイル構成
 
 - `state_verify.py` — CLIツール本体
 - `mcp_server.py` — MCPサーバー（FastMCP, stdio）。sv_guideでワークフローガイド提供
-- `.mcp.json` — Claude Code用MCP設定
+- `tests/mcp_e2e_test.py` — MCP E2Eテスト（20ケース）
+- `tests/test_stateful_self.py` — Hypothesis Stateful PBT（self-test）
 - `examples/`
   - `order-states.yaml` — 状態遷移検証（13行×8列=104セル、paths含む）
   - `mcp-implementation.yaml` — MCP実装検証（14行×6列=84セル）
@@ -121,15 +124,36 @@ pathsセクションで遷移の順序を定義すると:
 | データマイグレーション | テーブル×カラム変更 | エッジケース(null/invalid/fk/rollback) | data-migration.yaml |
 | 通知ルーティング | イベント×チャネル | ユーザー設定(opt_out/quiet_hours/frequency/locale) | notification-routing.yaml |
 
+## テスト生成パイプライン
+
+sv_testsで検証済み結果からテスト生成:
+
+```
+sv_tests --framework pytest          → LLMへのテスト生成prompt（言語問わず）
+sv_tests --framework stateful-pbt    → 状態マシン構造化データ + 変換prompt（言語非依存）
+sv_tests --framework mutmut          → mutation testingワークフロー（プロパティ強度検証）
+```
+
+stateful-pbtは言語非依存の構造化JSONを出力。LLMがそれを任意の言語に変換:
+- Python: Hypothesis RuleBasedStateMachine
+- TypeScript: fast-check modelRun
+- Go: rapid StateMachine
+- Rust: proptest
+- その他: conversion_prompt をLLMに渡して変換
+
 ## git ルール
 
 **テスト未実施のpushは禁止。** コード変更後は以下を必ず実行:
 
 ```bash
-.venv/bin/python3 tests/mcp_e2e_test.py  # 20/20 全パス確認
+# E2Eテスト（20ケース）
+.venv/bin/python3 tests/mcp_e2e_test.py
+
+# Stateful PBT
+.venv/bin/python3 -m pytest tests/test_stateful_self.py -v
 ```
 
-テスト全パスを確認してからcommit → push。例外なし。
+両方通過を確認してからcommit → push。例外なし。
 
 ## 注意事項
 
